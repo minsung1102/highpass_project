@@ -1,0 +1,116 @@
+import React from "react";
+import { Clock3, FileText, MapPin, MessageSquare } from "lucide-react";
+import type { BoardPost, PostComment } from "@/entities/common/types";
+import { formatBoardDate } from "@/shared/boards/utils/detail-utils";
+import { EmptyState } from "@/features/mypage/components/MyPageCommon";
+import { getStudyRegionBadge } from "@/features/study/utils/region";
+
+type MyCommentItem = {
+  comment: PostComment;
+  post: BoardPost;
+};
+
+function PostTypeBadge({ type }: { type: BoardPost["type"] }) {
+  return (
+    <span
+      className={`rounded-full px-3 py-1 text-xs font-bold ${
+        type === "study" ? "bg-hp-100 text-hp-700" : "bg-slate-100 text-slate-700"
+      }`}
+    >
+      {type === "study" ? "스터디 모집" : "자유 게시판"}
+    </span>
+  );
+}
+
+export function PostList({ posts, onOpenPost }: { posts: BoardPost[]; onOpenPost: (post: BoardPost) => void }) {
+  if (posts.length === 0) {
+    return (
+      <EmptyState
+        icon={<FileText size={24} />}
+        title="작성한 게시물이 없습니다"
+        description="자유 게시판과 스터디 모집 게시글을 작성하면 여기에서 모아볼 수 있습니다."
+      />
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {posts.map((post) => (
+        <button
+          key={`${post.type}-${post.id}`}
+          type="button"
+          onClick={() => onOpenPost(post)}
+          className="block w-full rounded-[24px] border border-slate-200 bg-white p-5 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-hp-300 hover:shadow-md"
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <PostTypeBadge type={post.type} />
+            {post.cert ? <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-700">{post.cert}</span> : null}
+            {post.type === "study" && post.location === "online" ? (
+              <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-bold text-blue-600">
+                온라인
+              </span>
+            ) : post.type === "study" && getStudyRegionBadge(post) ? (
+              <span className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-3 py-1 text-xs font-bold text-sky-600">
+                <MapPin size={12} />
+                {getStudyRegionBadge(post)}
+              </span>
+            ) : null}
+            <span className="inline-flex items-center gap-1 text-xs text-slate-400">
+              <Clock3 size={12} />
+              {formatBoardDate(post.createdAt)}
+            </span>
+          </div>
+
+          <h4 className="mt-3 text-lg font-black text-slate-950">{post.title}</h4>
+          <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-slate-600">{post.content}</p>
+
+          <div className="mt-4 flex flex-wrap items-center gap-4 text-sm font-semibold text-slate-500">
+            <span>조회수 {post.views}</span>
+            <span>좋아요 {post.likes}</span>
+            <span>댓글 {post.comments.length}</span>
+          </div>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function CommentList({ items, onOpenPost }: { items: MyCommentItem[]; onOpenPost: (post: BoardPost) => void }) {
+  if (items.length === 0) {
+    return (
+      <EmptyState
+        icon={<MessageSquare size={24} />}
+        title="작성한 댓글이 없습니다"
+        description="게시글에 댓글을 남기면 어떤 글에 참여했는지 여기에서 확인할 수 있습니다."
+      />
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {items.map(({ comment, post }) => (
+        <button
+          key={`${post.type}-${post.id}-${comment.id}`}
+          type="button"
+          onClick={() => onOpenPost(post)}
+          className="block w-full rounded-[24px] border border-slate-200 bg-white p-5 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-hp-300 hover:shadow-md"
+        >
+          <div className="flex items-center gap-2 text-sm font-semibold text-slate-500">
+            <PostTypeBadge type={post.type} />
+            <span className="min-w-0 truncate text-sm font-bold text-slate-900">{post.title}</span>
+          </div>
+          <div className="flex flex-wrap items-center justify-between">
+            <div>
+              <p className="ml-2 mt-2 whitespace-pre-wrap break-words text-base leading-7 text-slate-700">
+                {comment.text}
+              </p>
+            </div>
+            <span className="inline-flex items-center gap-1 text-xs text-slate-400">
+              <Clock3 size={12} />{formatBoardDate(comment.createdAt)}
+            </span>
+          </div>
+        </button>
+      ))}
+    </div>
+  );
+}

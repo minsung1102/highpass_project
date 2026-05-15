@@ -1,0 +1,1041 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ConfirmModal from "@/shared/components/common/ConfirmModal";
+import Avatar from "@/shared/components/common/Avatar";
+import { useRouter } from "next/navigation";
+import { Clock, Eye, Heart, Loader2, MapPin, MessageCircle, Search, X, ArrowLeft } from "lucide-react";
+import { useKakaoLoader } from "react-kakao-maps-sdk";
+import KakaoMap from "@/shared/components/map/KakaoMap";
+import { KAKAO_MAP_APPKEY } from "@/services/config/config";
+import type { BoardPost, PostComment, SearchPlace } from "@/entities/common/types";
+import { createComment, deleteComment as deleteCommentRequest, listComments, updateComment as updateCommentRequest } from "@/shared/boards/api/comments";
+import { isPostLiked, saveLikedPost, toggleBoardLike } from "@/shared/boards/api/likes";
+import { CERT_DATA } from "@/shared/constants";
+import { deleteStudy, updateStudy } from "@/features/study/api/study-api";
+import { formatBoardCreatedAt } from "@/shared/boards/utils/detail-utils";
+import { useApp } from "@/shared/context/AppContext";
+import { getMyChatRooms, joinStudyChatRoom } from "@/services/realtime/stomp";
+import { toast } from "sonner";
+import { toUserMessage } from "@/shared/errors";
+import { getStudyRegionBadge } from "@/features/study/utils/region";
+
+
+const CUSTOM_CERT_FILTER = "기타";
+
+export default function StudyPostPageClient({
+  postId,
+  initialPost,
+  initialComments,
+  returnTo,
+}: {
+  postId: string;
+  initialPost: BoardPost | null;
+  initialComments: PostComment[];
+  returnTo: string | null;
+}) {
+  const router = useRouter();
+  const { currentUser, chatRooms, setProfileModal, setChatRooms, setActiveChatRoomId, setIsEditing } = useApp();
+  const [post, setPost] = useState<BoardPost | null>(() =>
+    initialPost ? { ...initialPost, comments: initialComments } : null,
+  );
+  const [commentText, setCommentText] = useState("");
+  const [commentError, setCommentError] = useState("");
+  const [commentSubmitting, setCommentSubmitting] = useState(false);
+  const [likeSubmitting, setLikeSubmitting] = useState(false);
+  const [activeCommentId, setActiveCommentId] = useState<number | null>(null);
+  const [editingCommentId, setEditingCommentId] = useState<number | null>(null);
+  const [editingCommentText, setEditingCommentText] = useState("");
+  const [editingPost, setEditingPost] = useState(false);
+  const [postEditTitle, setPostEditTitle] = useState("");
+  const [postEditContent, setPostEditContent] = useState("");
+  const [postEditCertCategory, setPostEditCertCategory] = useState("");
+  const [postEditCert, setPostEditCert] = useState("");
+  const [postEditLocation, setPostEditLocation] = useState("");
+  const [placeKeyword, setPlaceKeyword] = useState("");
+  const [placeResults, setPlaceResults] = useState<SearchPlace[]>([]);
+  const [selectedEditPlace, setSelectedEditPlace] = useState<SearchPlace | null>(null);
+  const [postEditError, setPostEditError] = useState("");
+  const [postSaving, setPostSaving] = useState(false);
+  const [postDeleting, setPostDeleting] = useState(false);
+  const [cancelConfirmOpen, setCancelConfirmOpen] = useState(false);
+  const [joinConfirmOpen, setJoinConfirmOpen] = useState(false);
+  const [confirmCommentId, setConfirmCommentId] = useState<number | null>(null);
+  const [confirmDeletePost, setConfirmDeletePost] = useState(false);
+  const [cancelCommentConfirmOpen, setCancelCommentConfirmOpen] = useState(false);
+  const commentInputRef = useRef<HTMLInputElement>(null);
+  const [currentLocation, setCurrentLocation] = useState<{ lat: number; lng: number } | null>(null);
+
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (window.location.hash === "#comment-input") {
+      setTimeout(() => {
+        commentInputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+        commentInputRef.current?.focus();
+      }, 300);
+    }
+  }, []);
+
+  const [loadingKakao, errorKakao] = useKakaoLoader({
+    appkey: KAKAO_MAP_APPKEY,
+    libraries: ["services", "clusterer"],
+  });
+
+  const certificateCategories = useMemo(
+    () => Object.keys(CERT_DATA).filter((category) => category !== CUSTOM_CERT_FILTER),
+    [],
+  );
+  const certOptions = useMemo(
+    () => (postEditCertCategory && postEditCertCategory !== CUSTOM_CERT_FILTER ? CERT_DATA[postEditCertCategory] || [] : []),
+    [postEditCertCategory],
+  );
+  const isCustomCert = postEditCertCategory === CUSTOM_CERT_FILTER;
+
+  useEffect(() => {
+    setPost(initialPost ? { ...initialPost, comments: initialComments } : null);
+  }, [initialComments, initialPost]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    setPost((prev) =>
+      prev
+        ? {
+            ...prev,
+            likedByUser: isPostLiked(currentUser.id, "STUDY", prev.id),
+          }
+        : prev,
+    );
+  }, [currentUser]);
+
+  useEffect(() => {
+    if (!post) return;
+
+    const matchedCategory =
+      Object.entries(CERT_DATA).find(([category, certificates]) => category !== CUSTOM_CERT_FILTER && certificates.includes(post.cert || ""))?.[0] ?? "";
+
+    setPostEditTitle(post.title || "");
+    setPostEditContent(post.content || "");
+    setPostEditCertCategory(matchedCategory || ((post.cert || "").trim() ? CUSTOM_CERT_FILTER : ""));
+    setPostEditCert(post.cert || "");
+    setPostEditLocation(post.location || "");
+    setPlaceKeyword(post.location || "");
+    setSelectedEditPlace(
+      post.location && typeof post.lat === "number" && typeof post.lng === "number"
+        ? {
+            id: `study-${post.id}`,
+            name: post.location,
+            address: post.location,
+            lat: post.lat,
+            lng: post.lng,
+          }
+        : null,
+    );
+  }, [post]);
+
+  const syncComments = useCallback(
+    (comments: BoardPost["comments"]) => {
+      setPost((prev) => (prev ? { ...prev, comments } : prev));
+    },
+    [],
+  );
+
+  const loadComments = useCallback(async () => {
+    const comments = await listComments("STUDY", postId);
+    syncComments(comments);
+  }, [postId, syncComments]);
+
+  const updatePostLocally = useCallback(
+    (updater: (current: BoardPost) => BoardPost) => {
+      setPost((prev) => (prev ? updater(prev) : prev));
+    },
+    [],
+  );
+
+  const handleToggleLike = async () => {
+    if (!post || !currentUser || likeSubmitting) return;
+
+    const userId = Number(currentUser.id);
+    const targetId = Number(post.id);
+    if (!Number.isFinite(userId) || !Number.isFinite(targetId)) return;
+
+    try {
+      setLikeSubmitting(true);
+      const nextLiked = !post.likedByUser;
+      await toggleBoardLike("STUDY", targetId, userId);
+      saveLikedPost(currentUser.id, "STUDY", post.id, nextLiked);
+      updatePostLocally((currentPost) => ({
+        ...currentPost,
+        likes: nextLiked ? currentPost.likes + 1 : Math.max(0, currentPost.likes - 1),
+        likedByUser: nextLiked,
+      }));
+    } finally {
+      setLikeSubmitting(false);
+    }
+  };
+
+  const addComment = async () => {
+    if (!post || !currentUser || !commentText.trim()) return;
+
+    const userId = Number(currentUser.id);
+    const targetId = Number(post.id);
+    if (!Number.isFinite(userId) || !Number.isFinite(targetId)) {
+      setCommentError("댓글 요청에 필요한 사용자 또는 게시글 ID가 올바르지 않습니다.");
+      return;
+    }
+
+    try {
+      setCommentSubmitting(true);
+      setCommentError("");
+      await createComment({
+        content: commentText.trim(),
+        targetType: "STUDY",
+        targetId,
+        userId,
+      });
+      setCommentText("");
+      await loadComments();
+    } catch (e) {
+      setCommentError(e instanceof Error ? e.message : "댓글 등록에 실패했습니다.");
+    } finally {
+      setCommentSubmitting(false);
+    }
+  };
+
+  const cancelEditingComment = () => {
+    setEditingCommentId(null);
+    setEditingCommentText("");
+    setIsEditing(false);
+  };
+
+  const saveComment = async (commentId: number) => {
+    if (!post || !currentUser || !editingCommentText.trim()) return;
+
+    const userId = Number(currentUser.id);
+    const targetId = Number(post.id);
+    if (!Number.isFinite(userId) || !Number.isFinite(targetId)) {
+      setCommentError("댓글 요청에 필요한 사용자 또는 게시글 ID가 올바르지 않습니다.");
+      return;
+    }
+
+    try {
+      setActiveCommentId(commentId);
+      setCommentError("");
+      await updateCommentRequest(commentId, userId, {
+        content: editingCommentText.trim(),
+        targetType: "STUDY",
+        targetId,
+        userId,
+      });
+      cancelEditingComment();
+      await loadComments();
+    } catch (e) {
+      setCommentError(e instanceof Error ? e.message : "댓글 수정에 실패했습니다.");
+    } finally {
+      setActiveCommentId(null);
+    }
+  };
+
+  const removeComment = (commentId: number) => {
+    if (!currentUser) return;
+    setConfirmCommentId(commentId);
+  };
+
+  const doRemoveComment = async (commentId: number) => {
+    if (!currentUser) {
+      setCommentError("로그인이 필요합니다.")
+    return; 
+    }
+    
+    const userId = Number(currentUser.id);
+    if (!Number.isFinite(userId)) return;
+
+    try {
+      setActiveCommentId(commentId);
+      await deleteCommentRequest(commentId, userId);
+      if (editingCommentId === commentId) cancelEditingComment();
+      await loadComments();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "댓글 삭제에 실패했습니다.");
+    } finally {
+      setActiveCommentId(null);
+    }
+  };
+
+  const showMapPreview = true;
+  const canManagePost = !!currentUser && currentUser.id === post?.authorId;
+
+  const handleConfirmCancel = (): void => {
+  if (!post) return;
+  setEditingPost(false);
+  setIsEditing(false); 
+  setPostEditTitle(post.title || "");
+  setPostEditContent(post.content || "");
+  const matchedCategory =
+    Object.entries(CERT_DATA).find(([category, certificates]) => category !== CUSTOM_CERT_FILTER && certificates.includes(post.cert || ""))?.[0] ?? "";
+  setPostEditCertCategory(matchedCategory || ((post.cert || "").trim() ? CUSTOM_CERT_FILTER : ""));
+  setPostEditCert(post.cert || "");
+  setPostEditLocation(post.location || "");
+  setPlaceKeyword(post.location || "");
+  setSelectedEditPlace(
+    post.location && typeof post.lat === "number" && typeof post.lng === "number"
+      ? {
+          id: `study-${post.id}`,
+          name: post.location,
+          address: post.location,
+          lat: post.lat,
+          lng: post.lng,
+        }
+      : null,
+  );
+  setPostEditError("");
+  setCancelConfirmOpen(false); 
+  };
+
+  const cancelPostEdit = (): void => {
+    setCancelConfirmOpen(true);
+  };
+
+  const searchPlacesOnKakao = () => {
+    if (typeof window === "undefined") return;
+    const keyword = placeKeyword.trim();
+    if (!keyword) {
+      setPlaceResults([]);
+      return;
+    }
+
+    const kakaoMaps = window.kakao?.maps;
+    const services = kakaoMaps?.services;
+
+    if (!services) {
+      setPostEditError("지도 스크립트가 아직 로드되지 않았습니다.");
+      return;
+    }
+
+    const places = new services.Places();
+    places.keywordSearch(keyword, (data, status) => {
+      if (status !== services.Status.OK) {
+        setPlaceResults([]);
+        setPostEditError("장소 검색 결과가 없습니다.");
+        return;
+      }
+
+      setPostEditError("");
+      setPlaceResults(
+        data.map(
+          (item): SearchPlace => ({
+            id: item.id,
+            name: item.place_name,
+            address: item.road_address_name || item.address_name,
+            phone: item.phone,
+            category: item.category_group_name || item.category_name?.split(">").pop()?.trim(),
+            lat: parseFloat(item.y),
+            lng: parseFloat(item.x),
+          }),
+        ),
+      );
+    });
+  };
+
+  const savePost = async () => {
+    if (!post) return;
+
+    const title = postEditTitle.trim();
+    const content = postEditContent.trim();
+    const cert = postEditCert.trim();
+    const location = postEditLocation.trim();
+
+    if (!title || !content || !location) {
+      setPostEditError("제목, 본문, 장소를 모두 입력해 주세요.");
+      return;
+    }
+
+    try {
+      setPostSaving(true);
+      setPostEditError("");
+      const updated = await updateStudy(post.id, {
+        title,
+        content,
+        cert: cert || null,
+        locationName: selectedEditPlace?.name ?? location,
+        address: selectedEditPlace?.address ?? location,
+        latitude: selectedEditPlace?.lat ?? post.lat,
+        longitude: selectedEditPlace?.lng ?? post.lng,
+        placeId: selectedEditPlace?.id,
+      });
+
+      const hydrated = { ...updated, comments: post.comments };
+      setPost(hydrated);
+      setEditingPost(false);
+      setIsEditing(false); 
+      toast.success("게시글이 수정되었습니다.");
+    } catch (error) {
+      toast.error(toUserMessage(error, "게시글 수정에 실패했습니다."));
+    } finally {
+      setPostSaving(false);
+    }
+  };
+
+  const removePost = async () => {
+    if (!post || postDeleting) return;
+
+    try {
+      setPostDeleting(true);
+      await deleteStudy(post.id);
+      router.push(returnTo ? decodeURIComponent(returnTo) : "/study");
+    } catch (error) {
+      toast.error(toUserMessage(error, "게시글 삭제에 실패했습니다."));
+    } finally {
+      setPostDeleting(false);
+    }
+  };
+
+  const handleBackClick = () => {
+    if (editingPost) {
+      setCancelConfirmOpen(true);
+      return;
+    }
+
+    if (editingCommentId !== null) {
+      setCancelCommentConfirmOpen(true);
+      return;
+    }
+
+    router.push(returnTo ? decodeURIComponent(returnTo) : "/study");
+  };
+
+  if (!post) {
+    return (
+      <div className="mx-auto max-w-5xl rounded-[28px] border border-hp-100 bg-white px-6 py-16 text-center text-sm text-slate-400 shadow-[0_24px_80px_rgba(15,23,42,0.08)]">
+        게시물을 불러오지 못했습니다.
+      </div>
+    );
+  }
+
+  useEffect(() => {
+  navigator.geolocation.getCurrentPosition(
+    (pos) => setCurrentLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+    () => setCurrentLocation(null),
+      );
+    }, []);
+  
+return (
+  <div className="mx-auto max-w-4xl animate-in fade-in duration-500">
+    <div className="overflow-hidden rounded-[30px] border border-hp-100 bg-white shadow-[0_24px_80px_rgba(15,23,42,0.08)]">
+
+      {/* 상단 네비 */}
+      <div className="sticky top-0 z-10 border-b border-hp-100 bg-white/90 backdrop-blur">
+        <div className="flex items-center gap-3 px-5 py-3">
+          <button
+            onClick={handleBackClick}
+            className="flex items-center gap-1.5 rounded-full py-1.5 text-sm font-bold text-slate-500 transition hover:bg-slate-100 hover:text-slate-800"
+            aria-label="뒤로"
+          >
+            <ArrowLeft size={18} />
+            스터디 모집
+          </button>
+        </div>
+      </div>
+
+      {/* 본문 */}
+      <div className="px-5 py-6 lg:px-7">
+        {/* 헤더 */}
+        {!editingPost ? (
+          <div className="mb-2 space-y-2">
+            {/* 1줄: 제목 + 뱃지 */}
+            <div className="flex flex-wrap items-center gap-3">
+              {post.title ? (
+                <h1 className="text-3xl font-bold leading-tight tracking-[-0.02em] text-slate-950 ">
+                  {post.title}
+                </h1>
+              ) : null}
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-full bg-amber-50 px-3 py-1 text-[11px] font-bold text-amber-600">
+                  {post.cert || "기타"}
+                </span>
+                {post.location === "online" ? (
+                  <span className="rounded-full bg-blue-50 px-3 py-1 text-[11px] font-bold text-blue-600">
+                    온라인
+                  </span>
+                ) : getStudyRegionBadge(post) ? (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-3 py-1 text-[11px] font-bold text-sky-600">
+                    <MapPin size={12} />
+                    {getStudyRegionBadge(post)}
+                  </span>
+                ) :  (
+                <span className="rounded-full bg-slate-50 px-3 py-1 text-[11px] font-bold text-slate-400">
+                  장소 미정
+                </span>
+                )}
+              </div>
+            </div>
+
+            {/* 2줄: 작성자 + 날짜 + 수정/삭제 (왼쪽) + 채팅방 입장 (오른쪽) */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setProfileModal(post.authorId)}
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full"
+                >
+                  <Avatar
+                    name={post.author}
+                    customVisualClassName={post.authorAvatarVisualClassName ?? undefined}
+                    className="h-full w-full rounded-full text-xs"
+                  />
+                </button>
+                <button
+                  className="text-sm font-medium text-slate-600 hover:text-hp-700 hover:underline"
+                  onClick={() => setProfileModal(post.authorId)}
+                >
+                  {post.author}
+                </button>
+                <span className="text-xs text-slate-400"> {formatBoardCreatedAt(post.createdAt)}</span>
+                {canManagePost && (
+                  <>
+                    <span className="text-xs text-slate-300"> </span>
+                    <button
+                      type="button"
+                      onClick={() => { setEditingPost(true); setPostEditError(""); setIsEditing(true)}}
+                      className="text-xs text-slate-400 hover:text-slate-600"
+                    >
+                      수정
+                    </button>
+                    <span className="text-xs text-slate-300">|</span>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDeletePost(true)}
+                      disabled={postDeleting}
+                      className="text-xs text-slate-400 hover:text-red-400 disabled:opacity-60"
+                    >
+                      삭제
+                    </button>
+                  </>
+                )}
+              </div>
+              {post.id && post.chatRoomId && (
+                <>
+                  {(() => {
+                    const existingRoom = chatRooms.find((r) => String(r.id) === String(post.chatRoomId));
+                    const myParticipant = existingRoom?.participants?.find(
+                      (p) => Number(p.userId) === Number(currentUser?.id),
+                    );
+                    if (myParticipant?.status === "PENDING") {
+                      return (
+                        <button
+                          disabled
+                          className="shrink-0 inline-flex items-center gap-2 rounded-full bg-slate-200 px-4 py-2 text-xs font-bold text-slate-400 cursor-not-allowed"
+                        >
+                          <Clock size={15} />
+                          채팅방 입장 요청중
+                        </button>
+                      );
+                    }
+                    return (
+                      <button
+                        onClick={() => {
+                          if (myParticipant?.status === "JOINED") {
+                            setActiveChatRoomId(String(existingRoom!.id));
+                            router.push("/chat");
+                            return;
+                          }
+                          setJoinConfirmOpen(true);
+                        }}
+                        className="shrink-0 inline-flex items-center gap-2 rounded-full bg-hp-600 px-4 py-2 text-xs font-bold text-white transition hover:bg-hp-700 active:scale-95"
+                      >
+                        <MessageCircle size={15} className="fill-white/20" />
+                        채팅방 입장하기
+                      </button>
+                    );
+                  })()}
+                  <ConfirmModal
+                    isOpen={joinConfirmOpen}
+                    title="채팅방 참여 신청"
+                    description="방장 승인 후 채팅방에 입장할 수 있습니다."
+                    confirmLabel="신청하기"
+                    onConfirm={async () => {
+                      setJoinConfirmOpen(false);
+                      try {
+                        const result = await joinStudyChatRoom(post.id);
+                        const rooms = await getMyChatRooms();
+                        setChatRooms(rooms);
+                        toast.success("채팅방 참여를 신청했습니다. 방장의 승인을 기다려주세요.");
+                      } catch (error) {
+                        console.error("Join error:", error);
+                        toast.error("채팅방 참여 신청에 실패했습니다.");
+                      }
+                    }}
+                    onClose={() => setJoinConfirmOpen(false)}
+                  />
+                </>
+              )}
+            </div>
+          </div>
+        ) : null}
+
+        
+        <div className="pt-3">
+          {editingPost ? (
+            <div className="mx-auto space-y-3">
+              <div>
+                <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">제목</p>
+                <input
+                  value={postEditTitle}
+                  onChange={(event) => setPostEditTitle(event.target.value)}
+                  placeholder="제목"
+                  className="w-full rounded-2xl border border-hp-100 bg-white px-4 py-3 text-lg font-bold text-slate-950 outline-none focus:border-hp-500"
+                />
+              </div>
+              <div>
+                <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">자격증 선택</p>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div>
+                    <select
+                      value={postEditCertCategory}
+                      onChange={(event) => { setPostEditCertCategory(event.target.value); setPostEditCert(""); }}
+                      className={`w-full rounded-2xl border border-hp-100 bg-white px-4 py-3 text-sm outline-none focus:border-hp-500 ${isCustomCert ? "font-bold text-slate-900" : "text-slate-700"}`}
+                    >
+                      <option value="">분류 선택</option>
+                      {certificateCategories.map((category) => (
+                        <option key={category} value={category}>{category}</option>
+                      ))}
+                      <option value={CUSTOM_CERT_FILTER}>기타</option>
+                    </select>
+                  </div>
+                  <div>                 
+                    {isCustomCert ? (
+                      <input
+                        value={postEditCert}
+                        onChange={(event) => setPostEditCert(event.target.value)}
+                        placeholder="예: 한국사, 컴활 1급"
+                        className="w-full rounded-2xl border border-hp-100 bg-white px-4 py-3 text-sm text-slate-700 outline-none focus:border-hp-500"
+                      />
+                    ) : (
+                      <select
+                        value={postEditCert}
+                        onChange={(event) => setPostEditCert(event.target.value)}
+                        disabled={!postEditCertCategory}
+                        className="w-full rounded-2xl border border-hp-100 bg-white px-4 py-3 text-sm text-slate-700 outline-none focus:border-hp-500 disabled:opacity-40"
+                      >
+                        <option value="">{postEditCertCategory ? "자격증 선택" : "먼저 분류를 선택해 주세요"}</option>
+                        {certOptions.map((certificate) => (
+                          <option key={certificate} value={certificate}>{certificate}</option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div>
+                <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">본문</p>
+                <textarea
+                  value={postEditContent}
+                  onChange={(event) => setPostEditContent(event.target.value)}
+                  rows={12}
+                  placeholder="본문"
+                  className="w-full resize-y rounded-2xl border border-hp-100 bg-white px-4 py-4 text-[15px] leading-7 text-slate-700 outline-none focus:border-hp-500"
+                />
+              </div>
+              <div>
+                <p className="mb-2 text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">스터디 방식</p>
+                <div className="mb-4 flex items-center gap-3">
+                  <div className="flex overflow-hidden rounded-lg bg-slate-100">
+                    <button
+                      type="button"
+                      onClick={() => { setPostEditLocation(""); setPlaceKeyword(""); }}
+                      className={`px-4 py-2 text-sm font-bold transition-colors ${
+                        postEditLocation !== "online" ? "bg-hp-600 text-white" : "text-slate-500 hover:bg-slate-200"
+                      }`}
+                    >
+                      오프라인
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setPostEditLocation("online"); setSelectedEditPlace(null); setPlaceKeyword("online"); }}
+                      className={`px-4 py-2 text-sm font-bold transition-colors ${
+                        postEditLocation === "online" ? "bg-hp-600 text-white" : "text-slate-500 hover:bg-slate-200"
+                      }`}
+                    >
+                      온라인
+                    </button>
+                  </div>
+                </div>
+
+                {postEditLocation !== "online" && (
+                  <div className="space-y-3">
+                    <div className="relative">
+                      <input
+                        value={placeKeyword === "online" ? "" : placeKeyword}
+                        onChange={(e) => setPlaceKeyword(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && searchPlacesOnKakao()}
+                        placeholder="장소 검색 (예: 강남 카페)"
+                        className="w-full rounded-2xl border border-hp-100 bg-slate-50 pl-4 pr-20 py-3 text-sm outline-none focus:border-hp-500"
+                      />
+                      {placeKeyword && placeKeyword !== "online" && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPlaceKeyword("");
+                            setPlaceResults([]);
+                            setSelectedEditPlace(null);
+                            setPostEditLocation("");
+                          }}
+                          className="absolute right-10 top-1/2 -translate-y-1/2 text-slate-300 hover:text-slate-500"
+                          aria-label="검색어 지우기"
+                        >
+                          <X size={15} />
+                        </button>
+                      )}
+                      <button onClick={searchPlacesOnKakao} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-hp-600">
+                        <Search size={18} />
+                      </button>
+                    </div>
+
+                    {placeResults.length > 0 ? (
+                      <div className="flex h-72 flex-col gap-3 md:flex-row">
+                        <div className="w-full space-y-2 overflow-y-auto pr-1 md:w-1/2">
+                          {placeResults.map((result) => (
+                            <div
+                              key={result.id}
+                              onClick={() => {
+                                setSelectedEditPlace(result);
+                                setPostEditLocation(result.name);
+                              }}
+                              className={`cursor-pointer rounded-2xl border p-3 text-sm transition-all ${
+                                selectedEditPlace?.id === result.id
+                                  ? "border-hp-500 bg-hp-50 ring-1 ring-hp-400"
+                                  : "border-hp-100 bg-white hover:border-hp-300 hover:bg-hp-50"
+                              }`}
+                            >
+                              <p className="font-bold text-slate-800 truncate">{result.name}</p>
+                              <p className="mt-0.5 text-xs text-slate-400 truncate">{result.address}</p>
+                              {result.phone && <p className="mt-0.5 font-mono text-xs text-slate-400">{result.phone}</p>}
+                            </div>
+                          ))}
+                        </div>
+                        <div className="flex h-full w-full items-center justify-center overflow-hidden rounded-3xl border border-hp-100 shadow-inner md:w-1/2">
+                          {loadingKakao ? (
+                            <div className="flex flex-col items-center gap-2 text-slate-400">
+                              <Loader2 className="animate-spin" size={20} />
+                              <span className="text-xs">지도 로딩 중...</span>
+                            </div>
+                          ) : errorKakao ? (
+                            <p className="p-4 text-center text-xs text-red-400">카카오 지도를 불러오지 못했습니다.</p>
+                          ) : (
+                            <KakaoMap
+                              markers={placeResults.map((r) => ({ lat: r.lat, lng: r.lng, locationName: r.name }))}
+                              center={
+                                selectedEditPlace
+                                  ? { lat: selectedEditPlace.lat, lng: selectedEditPlace.lng }
+                                  : { lat: placeResults[0].lat, lng: placeResults[0].lng }
+                              }
+                              level={4}
+                            />
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="h-[250px] overflow-hidden rounded-3xl border border-hp-100 shadow-inner">
+                        <KakaoMap
+                          center={
+                            selectedEditPlace
+                              ? { lat: selectedEditPlace.lat, lng: selectedEditPlace.lng }
+                              : (post.lat && post.lng ? { lat: post.lat, lng: post.lng } : { lat: 37.56, lng: 126.97 })
+                          }
+                          markers={
+                            selectedEditPlace
+                              ? [{ lat: selectedEditPlace.lat, lng: selectedEditPlace.lng, locationName: selectedEditPlace.name }]
+                              : (post.lat && post.lng && post.location ? [{ lat: post.lat, lng: post.lng, locationName: post.location }] : [])
+                          }
+                        />
+                      </div>
+                    )}
+
+                    {selectedEditPlace && (
+                      <div className="flex items-center justify-between rounded-2xl bg-hp-50 px-4 py-2.5">
+                        <p className="text-sm font-bold text-hp-700">📍 {selectedEditPlace.name}</p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedEditPlace(null);
+                            setPlaceResults([]);
+                            setPlaceKeyword("");
+                            setPostEditLocation("");
+                          }}
+                          className="text-slate-400 hover:text-slate-600"
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+              {/* 에러 메시지 표시 영역 */}
+              {postEditError ? (
+                <div className="flex items-center gap-2 rounded-xl bg-red-50 px-4 py-3 text-sm font-semibold text-red-500 animate-in slide-in-from-top-1">
+                  <span>⚠️</span> {postEditError}
+                </div>
+              ) : null}
+
+              {/* 수정 중 버튼 - 본문 아래 */}
+              <div className="flex justify-end gap-2 border-t border-hp-100 pt-4">
+                <button
+                  type="button"
+                  onClick={() => setCancelConfirmOpen(true)}
+                  className="rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
+                >
+                  취소
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void savePost()}
+                  disabled={postSaving}
+                  className="rounded-full bg-hp-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-hp-700 disabled:opacity-60"
+                >
+                  {postSaving ? "저장 중.." : "저장"}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div>
+              <p className="min-h-[8rem] whitespace-pre-wrap text-[15px] leading-8 text-slate-700">
+                {post.content}
+              </p>
+              <div className="mt-5 flex justify-end">
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => void handleToggleLike()}
+                    disabled={likeSubmitting}
+                    className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-bold transition ${
+                    post.likedByUser ? "text-red-400" : "text-slate-400 hover:bg-slate-100"
+                  } disabled:opacity-50`}
+                  >
+                    <Heart size={13} className={post.likedByUser ? "fill-current" : ""} />
+                    좋아요 {post.likes}
+                  </button>
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-slate-400">
+                    <Eye size={13} />
+                    조회 {post.views}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* 스터디 스팟 - 본문 아래 */}
+        {!editingPost && (
+          <div className="mt-4 border-t border-hp-100 pt-4">
+            {post.location === "online" ? (
+              <div className="flex items-center gap-2 rounded-2xl bg-blue-50 px-4 py-3 text-sm font-semibold text-blue-600">
+                <span>🌐</span> 온라인 스터디입니다.
+              </div>
+            ) : !post.location || !post.lat || !post.lng ? ( 
+            <div className="flex items-center gap-2 rounded-2xl bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-400">
+            <span>📍</span> 스터디 장소가 아직 지정되지 않았습니다.
+            </div>
+            ) : (
+              <div className="overflow-hidden rounded-3xl border border-hp-100">              
+                  {/* 헤더 */}
+                  <div className="flex items-center justify-between border-b border-hp-100 bg-slate-50 px-4 py-3">
+                    <div>
+                      <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-0.5">스터디 장소</p>
+                      <div className="flex items-center gap-1.5">
+                        <MapPin size={14} className="shrink-0 text-hp-500" />
+                        <p className="text-sm font-bold text-slate-800">{post.location}</p>
+                      </div>
+                      {post.address && (
+                        <p className="mt-0.5 text-xs text-slate-400 pl-[22px]">{post.address}</p>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                    <a
+                      href={
+                        currentLocation
+                          ? "https://map.kakao.com/link/from/현재위치," + currentLocation.lat + "," + currentLocation.lng + "/to/" + encodeURIComponent(post.location) + "," + post.lat + "," + post.lng
+                          : "https://map.kakao.com/link/to/" + encodeURIComponent(post.location) + "," + post.lat + "," + post.lng
+                      }
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-bold text-slate-600 transition hover:bg-slate-100"
+                    >
+                     길찾기
+                    </a>
+                  </div>
+                </div>
+                <KakaoMap
+                  markers={[{ lat: post.lat, lng: post.lng, locationName: post.location }]}
+                  center={{ lat: post.lat, lng: post.lng }}
+                  level={3}
+                />
+              </div>
+            )}
+          </div>
+        )}
+        
+        {/* 댓글 */}
+        {!editingPost && (
+          <div className="mt-3 border-t border-hp-100 pt-6">
+            <div className="mb-4 text-xs font-semibold uppercase tracking-[0.24em] text-hp-500">
+              댓글({post.comments.length})
+            </div>
+
+            {post.comments && post.comments.length > 0 ? (
+              <ul className="mb-6 divide-y divide-hp-100">
+                {post.comments.map((comment) => (
+                  <li key={comment.id} className="py-3">
+                    {editingCommentId === comment.id ? (
+                      <div className="space-y-2">
+                        <textarea
+                          value={editingCommentText}
+                          onChange={(e) => setEditingCommentText(e.target.value)}
+                          rows={3}
+                          className="w-full resize-none rounded-xl border border-hp-100 px-3 py-2 text-sm outline-none focus:border-hp-500"
+                        />
+                        <div className="flex justify-end gap-2">
+                          <button
+                            onClick={() => setCancelCommentConfirmOpen(true)}
+                            className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-500 hover:bg-slate-50"
+                          >
+                            취소
+                          </button>
+                          <button
+                            onClick={() => void saveComment(comment.id)}
+                            disabled={activeCommentId === comment.id}
+                            className="rounded-full bg-hp-600 px-3 py-1 text-xs font-semibold text-white hover:bg-hp-700 disabled:opacity-60"
+                          >
+                            저장
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="flex gap-2 min-w-0">
+                          <button
+                            onClick={() => comment.authorId && setProfileModal(comment.authorId)}
+                            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full"
+                          >
+                            <Avatar
+                              name={comment.author}
+                              customVisualClassName={comment.avatarVisualClassName ?? undefined}
+                              className="h-full w-full rounded-full text-xs"
+                            />
+                          </button>
+                          <div className="flex flex-col gap-0.5 min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                onClick={() => comment.authorId && setProfileModal(comment.authorId)}
+                                className="text-xs font-semibold text-slate-700 hover:text-hp-600 hover:underline"
+                              >
+                                {comment.author}
+                              </button>
+                              {comment.createdAt && (
+                                <span className="text-[10px] text-slate-400">{formatBoardCreatedAt(comment.createdAt)}</span>
+                              )}
+                            </div>
+                            <div className="flex items-end gap-2">
+                              <p className="flex-1 text-sm leading-6 text-slate-700 whitespace-pre-wrap">{comment.text}</p>
+                              {currentUser?.id === comment.authorId && (
+                                <div className="shrink-0 flex items-center gap-0.5 pb-0.5">
+                                  <button
+                                    onClick={() => { setEditingCommentId(comment.id); setEditingCommentText(comment.text);  setIsEditing(true);}}
+                                    className="rounded-full px-2 py-0.5 text-[11px] font-semibold text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+                                  >
+                                    수정
+                                  </button>
+                                  <span className="text-[10px] text-slate-300">·</span>
+                                  <button
+                                    onClick={() => void removeComment(comment.id)}
+                                    disabled={activeCommentId === comment.id}
+                                    className="rounded-full px-2 py-0.5 text-[11px] font-semibold text-slate-400 hover:bg-red-50 hover:text-red-400 disabled:opacity-50"
+                                  >
+                                    삭제
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+
+            {commentError && (
+              <p className="mb-2 text-xs font-semibold text-red-500">{commentError}</p>
+            )}
+            <div className="flex items-center gap-2 mb-2">
+              <input
+                ref={commentInputRef}
+                id="comment-input"
+                type="text"
+                value={commentText}
+                onChange={(e) => setCommentText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void addComment();
+                  }
+                }}
+                placeholder="댓글을 입력하세요"
+                className="flex-1 rounded-full border border-hp-100 bg-slate-50 px-4 py-2.5 text-sm outline-none focus:border-hp-500"
+              />
+              <button
+                onClick={() => void addComment()}
+                disabled={commentSubmitting || !commentText.trim()}
+                className="shrink-0 rounded-full bg-hp-600 px-4 py-2.5 text-xs font-semibold text-white transition hover:bg-hp-700 disabled:opacity-50"
+              >
+                {commentSubmitting ? "등록 중..." : "등록"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+
+    <ConfirmModal
+      isOpen={confirmCommentId !== null}
+      title="댓글을 삭제하시겠습니까?"
+      description="삭제한 댓글은 복구할 수 없습니다."
+      confirmLabel="삭제"
+      variant="danger"
+      onConfirm={() => { if (confirmCommentId !== null) void doRemoveComment(confirmCommentId); setConfirmCommentId(null); }}
+      onClose={() => setConfirmCommentId(null)}
+    />
+    <ConfirmModal
+      isOpen={confirmDeletePost}
+      title="게시글을 삭제하시겠습니까?"
+      description="삭제한 게시글은 복구할 수 없습니다."
+      confirmLabel="삭제"
+      variant="danger"
+      onConfirm={() => { setConfirmDeletePost(false); void removePost(); }}
+      onClose={() => setConfirmDeletePost(false)}
+    />
+    <ConfirmModal
+      isOpen={cancelConfirmOpen}
+      title="수정을 취소하시겠습니까?"
+      description="변경사항이 저장되지 않습니다."
+      confirmLabel="확인"
+      variant="danger"
+      onConfirm={() => {
+        handleConfirmCancel()
+      }}
+      onClose={() => setCancelConfirmOpen(false)}
+    />
+    <ConfirmModal
+      isOpen={cancelCommentConfirmOpen}
+      title="댓글 수정을 취소하시겠습니까?"
+      description="변경사항이 저장되지 않습니다."
+      confirmLabel="확인"
+      variant="danger"
+      onConfirm={() => {
+        setCancelCommentConfirmOpen(false);
+        cancelEditingComment();
+      }}
+      onClose={() => setCancelCommentConfirmOpen(false)}
+    />
+  </div>
+);
+}

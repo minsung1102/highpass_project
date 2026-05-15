@@ -1,0 +1,10 @@
+ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+    ADD COLUMN IF NOT EXISTS last_login_at DATETIME NULL,
+    ADD COLUMN IF NOT EXISTS last_seen_at DATETIME NULL,
+    ADD COLUMN IF NOT EXISTS role VARCHAR(20) NOT NULL DEFAULT 'USER';
+
+UPDATE users
+SET role = 'ADMIN',
+    status = 'ACTIVE'
+WHERE email = 'admin@highpass.local';

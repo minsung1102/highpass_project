@@ -1,0 +1,2 @@
+ALTER TABLE national_certificate
+    ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP;

@@ -1,0 +1,90 @@
+spring:
+  application:
+    name: highpass_backend
+  config:
+    import: optional:file:env.properties
+
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3310/highpassdb?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Seoul&zeroDateTimeBehavior=convertToNull}
+    username: ${SPRING_DATASOURCE_USERNAME:root}
+    password: ${SPRING_DATASOURCE_PASSWORD:1234}
+
+  jackson:
+    deserialization:
+      fail-on-null-for-primitives: false
+    time-zone: Asia/Seoul
+
+  jpa:
+    database-platform: org.hibernate.dialect.MySQLDialect
+    hibernate:
+      ddl-auto: ${SPRING_JPA_HIBERNATE_DDL_AUTO:update} # local default; use validate/none in production
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+        jdbc:
+          time_zone: Asia/Seoul
+
+  flyway:
+    enabled: ${SPRING_FLYWAY_ENABLED:true}
+    locations: classpath:db/migration
+    baseline-on-migrate: ${SPRING_FLYWAY_BASELINE_ON_MIGRATE:true}
+    baseline-version: ${SPRING_FLYWAY_BASELINE_VERSION:0}
+
+  security:
+    oauth2:
+      client:
+        registration:
+          google:
+            client-id: ${GOOGLE_CLIENT_ID}
+            client-secret: ${GOOGLE_CLIENT_SECRET}
+            scope:
+              - email
+              - profile
+            redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
+
+          kakao:
+            client-name: Kakao
+            client-id: ${KAKAO_REST_API_KEY}
+            authorization-grant-type: authorization_code
+            redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
+            scope:
+              - profile_nickname
+              - account_email
+          kakao-calendar:
+            client-name: Kakao Calendar
+            client-id: ${KAKAO_REST_API_KEY}
+            provider: kakao
+            authorization-grant-type: authorization_code
+            redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
+            scope:
+              - talk_calendar
+
+        provider:
+          kakao:
+            authorization-uri: https://kauth.kakao.com/oauth/authorize
+            token-uri: https://kauth.kakao.com/oauth/token
+            user-info-uri: https://kapi.kakao.com/v2/user/me
+            user-name-attribute: id
+api:
+  public-data:
+    key: ${PUBLIC_DATA_API_KEY}
+
+server:
+  port: ${PORT:8080}
+  forward-headers-strategy: framework
+
+jwt:
+  secret: ${JWT_SECRET_KEY}
+  expiration: ${JWT_EXPIRATION}
+  access-token-expiration: 900000
+  refresh-token-expiration: 1209600000
+
+app:
+  frontend-url: ${FRONTEND_URL:http://localhost:3000}
+  secure-cookie: ${SECURE_COOKIE:false}
+  admin:
+    email: ${ADMIN_EMAIL:admin@highpass.local}
+    password: ${ADMIN_PASSWORD:Admin1234!}
+    nickname: ${ADMIN_NICKNAME:관리자}

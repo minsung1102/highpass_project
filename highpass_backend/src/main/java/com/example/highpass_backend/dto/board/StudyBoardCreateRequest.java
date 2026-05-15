@@ -1,0 +1,29 @@
+package com.example.highpass_backend.dto.board;
+
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
+
+public record StudyBoardCreateRequest(
+    @NotBlank(message = "제목을 입력해 주세요.")
+    @Size(max = 100, message = "제목은 100자 이하로 입력해 주세요.")
+    String title,
+
+    @NotBlank(message = "내용을 입력해 주세요.")
+    @Size(max = 5000, message = "내용은 5000자 이하로 입력해 주세요.")
+    String content,
+
+    @Size(max = 120, message = "장소명은 120자 이하로 입력해 주세요.")
+    String locationName,
+
+    @Size(max = 255, message = "주소는 255자 이하로 입력해 주세요.")
+    String address,
+    Double latitude,
+    Double longitude,
+
+    @Size(max = 120, message = "장소 ID는 120자 이하로 입력해 주세요.")
+    String placeId,
+
+    @Size(max = 120, message = "자격증명은 120자 이하로 입력해 주세요.")
+    String cert,
+    boolean createChatRoom
+) {}
